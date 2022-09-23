@@ -21,41 +21,53 @@ def fit(X: Array, quiet: bool=False):
     chunk_size = min(ngenes, max(1, int(1e8 / 4 / ncells)))
     quiet or print(f"chunk size: {chunk_size}")
 
-    δ_loc_chunks = []
-    δ_scale_chunks = []
+    log_expr_mean_chunks = []
+    log_expr_var_chunks = []
+    log_fc_mean_chunks = []
+    log_fc_var_chunks = []
 
     for gene_from in range(0, ngenes, chunk_size):
         gene_to = min(gene_from + chunk_size, ngenes)
+
+        print(f"Normalizing genes {gene_from} to {gene_to}")
 
         Xchunk = X[:,gene_from:gene_to]
         Xchunk = jax.device_put(
             Xchunk if isinstance(Xchunk, np.ndarray) else Xchunk.toarray()).astype(jnp.float32)
 
-        δ_loc, δ_scale = fit_chunk(Xchunk, Nc)
+        log_expr_mean, log_expr_var, log_fc_mean, log_fc_var = \
+            fit_chunk(Xchunk, Nc)
 
-        δ_loc_chunks.append(δ_loc)
-        δ_scale_chunks.append(δ_loc)
+        log_expr_mean_chunks.append(log_expr_mean)
+        log_expr_var_chunks.append(log_expr_var)
+        log_fc_mean_chunks.append(log_fc_mean)
+        log_fc_var_chunks.append(log_fc_var)
 
-    δ_loc = np.concatenate(δ_loc_chunks, axis=1)
-    δ_scale = np.concatenate(δ_scale_chunks, axis=1)
+    log_expr_mean = np.concatenate(log_expr_mean_chunks, axis=1)
+    log_expr_var = np.concatenate(log_expr_var_chunks, axis=1)
+    log_fc_mean = np.concatenate(log_fc_mean_chunks, axis=1)
+    log_fc_var = np.concatenate(log_fc_var_chunks, axis=1)
 
-    assert δ_loc.shape == X.shape
-    assert δ_scale.shape == X.shape
+    assert log_expr_mean.shape == X.shape
+    assert log_expr_var.shape == X.shape
+    assert log_fc_mean.shape == X.shape
+    assert log_fc_var.shape == X.shape
 
-    return δ_loc, δ_scale
+    return (log_expr_mean, log_expr_var, log_fc_mean, log_fc_var)
 
 
 # X: [ncell, ngene]
 # Nc: [ncell]
-def fit_chunk(X: Array, Nc: Array, maxiter: int=4000, seed: int=9876543210):
+def fit_chunk(X: Array, Nc: Array, maxiter: int=6000, seed: int=9876543210):
     key = jax.random.PRNGKey(seed)
     key, ρ_key, h_key = jax.random.split(key, 3)
 
     ncells, ngenes = X.shape
 
-    print((ncells, ngenes))
-
     params = {
+        "log_α_loc":
+            jnp.mean(jnp.log(1e-8 + X / jnp.expand_dims(Nc, 1)), axis=0),
+        "log_α_scale": jnp.full(ngenes, -2.0),
         "δ_loc": jnp.zeros((ncells, ngenes)),
         "δ_scale": jnp.full((ncells, ngenes), -2.0),
         "v_loc": jnp.zeros(ngenes),
@@ -67,28 +79,31 @@ def fit_chunk(X: Array, Nc: Array, maxiter: int=4000, seed: int=9876543210):
 
     Ng = jnp.sum(X, axis=0) # [ngenes]
 
-    # precompute the log-likelihood terms that are constant wrt δ
-    c = \
-        jax.scipy.special.gammaln(Ng + 1) + \
+    c_g = \
         jnp.einsum("cg,c->g", X, jnp.log(Nc)) + \
         jnp.sum(jax.scipy.special.gammaln(X + 1), axis=0) # [ngenes]
 
-    def logprob(q, X, Nc, Ng, c):
-        δ = q["δ"]
-        v = q["v"]
+    c = jnp.sum(c_g)
 
+    def logprob(q, X, Nc, Ng, c):
+        log_α = q["log_α"] # [batch, ngenes]
+        δ = q["δ"] # [batch, ncells, ngenes]
+        v = q["v"] # [batch, ngenes]
+
+        # Like in sanity, we are adopting an improper prior on α
+        # TODO: We might consider some very mild prior on log_α to prevent
+        # it from shrinking towards -infinity
         prior_lp = \
             jnp.sum(tfd.Normal(loc=0.0, scale=v).log_prob(δ), axis=(1,2)) + \
             jnp.sum(tfd.HalfCauchy(loc=0.0, scale=0.1).log_prob(v), axis=1)
 
         # sanity's log likelihood derivation
-        likelihood_lp = jnp.sum(
-            jnp.expand_dims(c, 0) + \
-            jnp.einsum("cg,bcg->bg", X, δ) - \
-            (Ng + 1) * jnp.log(jnp.einsum("c,bcg->bg", Nc, jnp.exp(δ))),
-            axis=1)
+        likelihood_lp = \
+            jnp.einsum("cg,bcg->b", X, δ) + \
+            jnp.einsum("g,bg->b", Ng, log_α) - \
+            jnp.einsum("c,bcg->b", Nc, jnp.exp(jnp.expand_dims(log_α, 1) + δ))
 
-        return prior_lp + likelihood_lp
+        return prior_lp + likelihood_lp + c
 
     @jax.jit
     def step(params, opt_state, key, X, Nc, Ng, c):
@@ -114,12 +129,31 @@ def fit_chunk(X: Array, Nc: Array, maxiter: int=4000, seed: int=9876543210):
             print(f"Epoch: {epoch}, ELBO: {loss_value}")
 
     # Not estimate log-expression and it's variance
+    δ_loc = params["δ_loc"]
+    δ_scale = nn.softplus(params["δ_scale"])
 
-    return (np.array(params["δ_loc"]), np.array(nn.softplus(params["δ_scale"])))
+    log_α_loc = params["log_α_loc"]
+    log_α_scale = nn.softplus(params["log_α_scale"])
+
+    log_expr_mean = jnp.expand_dims(log_α_loc, 0) + δ_loc
+    log_expr_var = jnp.square(jnp.expand_dims(log_α_scale, 0)) + jnp.square(δ_loc)
+
+    log_fc_mean = δ_loc
+    log_fc_var = jnp.square(δ_scale)
+
+    return (
+        np.array(log_expr_mean),
+        np.array(log_expr_var),
+        np.array(log_fc_mean),
+        np.array(log_fc_var))
 
 
 def surrogate_posterior(params):
     return tfd.JointDistributionNamed({
+        "log_α": tfd.Independent(tfd.Normal(
+                loc=params["log_α_loc"],
+                scale=nn.softplus(params["log_α_scale"])),
+            reinterpreted_batch_ndims=1),
         "δ": tfd.Independent(tfd.Normal(
                 loc=params["δ_loc"],
                 scale=nn.softplus(params["δ_scale"])),

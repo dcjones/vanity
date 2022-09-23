@@ -12,19 +12,36 @@ from .model import fit
 
 def normalize_vanity(adata: AnnData, inplace: bool=True):
     """
-    Normalize using a Bayesian regression model.
+    Estimate log-expression values using a Bayesian regression model.
+
+    Args:
+      adata: A `anndata.AnnData` object with raw counts in the `X` matrix.
+      inplace: Flag controlling whether to modify `adata` in place or return estimates.
+
+    Returns:
+      If `inplace` is True, modifies `adata` by replacing `adata.X` with
+      posterior mean log-expression values. In addition, adds the following entries
+      to `adata.layers`.
+        - "vanity_var": posterior variance estimates for the log-expression values
+        - "vanity_log_fc_mean": posterior mean estimates of log fold-change versus the mean
+        - "vanity_log_fc_var": posterior variance estimates of log fold-change
+
+    If `inplace` is False, instead return a dict with these entries.
     """
 
     # TODO: check that this is count data
 
-    δ_loc, δ_scale = fit(adata.X)
-
-    # TODO: we should do like sanity does and try to recover some
-    # log expression values, rather than just fold changes. Though this is
-    # totally suitable for running maxspin
+    log_expr_mean, log_expr_var, log_fc_mean, log_fc_var = fit(adata.X)
 
     if inplace:
-        adata.X = δ_loc
-        adata.layers["vanity_var"] = δ_scale
+        adata.X = log_expr_mean
+        adata.layers["vanity_var"] = log_expr_var
+        adata.layers["vanity_log_fc_mean"] = log_fc_mean
+        adata.layers["vanity_log_fc_var"] = log_fc_var
     else:
-        return { "X": δ_loc, "vanity_var": δ_scale }
+        return {
+            "X": log_expr_mean,
+            "vanity_var": log_expr_var,
+            "vanity_log_fc_mean": log_fc_mean,
+            "vanity_log_fc_var": log_fc_var,
+        }
