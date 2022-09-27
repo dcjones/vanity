@@ -8,7 +8,6 @@ import numpy as np
 import optax
 import tensorflow_probability.substrates.jax as tfp
 import tensorflow_probability.substrates.jax.distributions as tfd
-import sys
 
 Array = Any
 
@@ -29,14 +28,14 @@ def fit(X: Array, quiet: bool=False):
     for gene_from in range(0, ngenes, chunk_size):
         gene_to = min(gene_from + chunk_size, ngenes)
 
-        print(f"Normalizing genes {gene_from} to {gene_to}")
+        quiet or print(f"Normalizing genes {gene_from} to {gene_to}")
 
         Xchunk = X[:,gene_from:gene_to]
         Xchunk = jax.device_put(
             Xchunk if isinstance(Xchunk, np.ndarray) else Xchunk.toarray()).astype(jnp.float32)
 
         log_expr_mean, log_expr_var, log_fc_mean, log_fc_var = \
-            fit_chunk(Xchunk, Nc)
+            fit_chunk(Xchunk, Nc, quiet=quiet)
 
         log_expr_mean_chunks.append(log_expr_mean)
         log_expr_var_chunks.append(log_expr_var)
@@ -58,9 +57,8 @@ def fit(X: Array, quiet: bool=False):
 
 # X: [ncell, ngene]
 # Nc: [ncell]
-def fit_chunk(X: Array, Nc: Array, maxiter: int=6000, seed: int=9876543210):
+def fit_chunk(X: Array, Nc: Array, maxiter: int=10000, seed: int=9876543210, quiet: bool=False):
     key = jax.random.PRNGKey(seed)
-    key, ρ_key, h_key = jax.random.split(key, 3)
 
     ncells, ngenes = X.shape
 
@@ -79,6 +77,7 @@ def fit_chunk(X: Array, Nc: Array, maxiter: int=6000, seed: int=9876543210):
 
     Ng = jnp.sum(X, axis=0) # [ngenes]
 
+    # terms in the likelihood that are constant wrt δ and α
     c_g = \
         jnp.einsum("cg,c->g", X, jnp.log(Nc)) + \
         jnp.sum(jax.scipy.special.gammaln(X + 1), axis=0) # [ngenes]
@@ -125,7 +124,7 @@ def fit_chunk(X: Array, Nc: Array, maxiter: int=6000, seed: int=9876543210):
 
         # TODO: check for convergence and quit early if possible
 
-        if epoch % 100 == 0:
+        if not quiet and epoch % 100 == 0:
             print(f"Epoch: {epoch}, ELBO: {loss_value}")
 
     # Not estimate log-expression and it's variance
@@ -136,7 +135,7 @@ def fit_chunk(X: Array, Nc: Array, maxiter: int=6000, seed: int=9876543210):
     log_α_scale = nn.softplus(params["log_α_scale"])
 
     log_expr_mean = jnp.expand_dims(log_α_loc, 0) + δ_loc
-    log_expr_var = jnp.square(jnp.expand_dims(log_α_scale, 0)) + jnp.square(δ_loc)
+    log_expr_var = jnp.square(jnp.expand_dims(log_α_scale, 0)) + jnp.square(δ_scale)
 
     log_fc_mean = δ_loc
     log_fc_var = jnp.square(δ_scale)
