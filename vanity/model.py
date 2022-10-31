@@ -94,7 +94,7 @@ def fit_chunk(X: Array, Nc: Array, maxiter: int=10000, seed: int=9876543210, qui
         # it from shrinking towards -infinity
         prior_lp = \
             jnp.sum(tfd.Normal(loc=0.0, scale=v).log_prob(δ), axis=(1,2)) + \
-            jnp.sum(tfd.HalfCauchy(loc=0.0, scale=0.1).log_prob(v), axis=1)
+            jnp.sum(tfd.HalfCauchy(loc=0.0, scale=1.0).log_prob(v), axis=1)
 
         # sanity's log likelihood derivation
         likelihood_lp = \
