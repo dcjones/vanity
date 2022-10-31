@@ -1,5 +1,6 @@
 
 
+from tqdm import tqdm
 from typing import Any
 import jax
 import jax.nn as nn
@@ -28,14 +29,12 @@ def fit(X: Array, quiet: bool=False):
     for gene_from in range(0, ngenes, chunk_size):
         gene_to = min(gene_from + chunk_size, ngenes)
 
-        quiet or print(f"Normalizing genes {gene_from} to {gene_to}")
-
         Xchunk = X[:,gene_from:gene_to]
         Xchunk = jax.device_put(
             Xchunk if isinstance(Xchunk, np.ndarray) else Xchunk.toarray()).astype(jnp.float32)
 
         log_expr_mean, log_expr_var, log_fc_mean, log_fc_var = \
-            fit_chunk(Xchunk, Nc, quiet=quiet)
+            fit_chunk(Xchunk, Nc, desc=f"Normalizing genes {gene_from} to {gene_to}", quiet=quiet)
 
         log_expr_mean_chunks.append(log_expr_mean)
         log_expr_var_chunks.append(log_expr_var)
@@ -57,7 +56,9 @@ def fit(X: Array, quiet: bool=False):
 
 # X: [ncell, ngene]
 # Nc: [ncell]
-def fit_chunk(X: Array, Nc: Array, maxiter: int=10000, seed: int=9876543210, quiet: bool=False):
+def fit_chunk(
+        X: Array, Nc: Array, maxiter: int=10000, seed: int=9876543210,
+        desc="", quiet: bool=False):
     key = jax.random.PRNGKey(seed)
 
     ncells, ngenes = X.shape
@@ -117,6 +118,8 @@ def fit_chunk(X: Array, Nc: Array, maxiter: int=10000, seed: int=9876543210, qui
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss_value
 
+    prog = None if quiet else tqdm(total=maxiter, desc=desc)
+    prog_update_freq = 50
     for epoch in range(maxiter):
         step_key, key = jax.random.split(key)
         params, opt_state, loss_value = \
@@ -124,8 +127,9 @@ def fit_chunk(X: Array, Nc: Array, maxiter: int=10000, seed: int=9876543210, qui
 
         # TODO: check for convergence and quit early if possible
 
-        if not quiet and epoch % 100 == 0:
-            print(f"Epoch: {epoch}, ELBO: {loss_value}")
+        if not quiet and epoch % prog_update_freq == 0:
+            prog.update(prog_update_freq)
+            prog.set_postfix(elbo=jnp.float32(loss_value))
 
     # Not estimate log-expression and it's variance
     δ_loc = params["δ_loc"]
